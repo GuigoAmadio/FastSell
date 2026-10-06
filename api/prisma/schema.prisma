@@ -1,0 +1,110 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                   String         @id @default(uuid())
+  email                String         @unique
+  passwordHash         String
+  name                 String?
+  phone                String?
+  cpf                  String?
+  photoUrl             String?
+  biometricEnabled     Boolean        @default(false)
+  twoFactorEnabled     Boolean        @default(false)
+  twoFactorMethod      TwoFactorMethod?
+  totpSecret           String?
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+  refreshTokens        RefreshToken[]
+  passwordResetTokens  PasswordResetToken[]
+  loginAttempts        LoginAttempt[]
+  addresses            Address[]
+}
+
+enum TwoFactorMethod {
+  TOTP
+  SMS
+}
+
+model RefreshToken {
+  id          String    @id @default(uuid())
+  tokenHash   String    @unique
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  lastUsedAt  DateTime?
+  ip          String?
+  userAgent   String?
+  deviceLabel String?
+
+  @@index([userId])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(uuid())
+  tokenHash String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model LoginAttempt {
+  id        String   @id @default(uuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  email     String?
+  ip        String?
+  success   Boolean
+  reason    String?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([ip])
+  @@index([email])
+}
+
+model Address {
+  id           String   @id @default(uuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label        String?
+  cep          String
+  street       String
+  number       String
+  complement   String?
+  neighborhood String
+  city         String
+  state        String
+  isDefault    Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  tableName  String
+  operation  String
+  rowId      String?
+  oldData    Json?
+  newData    Json?
+  dbUser     String?
+  changedAt  DateTime @default(now())
+
+  @@index([tableName, changedAt])
+  @@index([rowId])
+  @@index([changedAt])
+}
