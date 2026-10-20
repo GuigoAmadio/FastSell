@@ -73,6 +73,7 @@ flutter run -d windows
 cd api
 cp .env.example .env   # se ainda não tiver .env
 npm install
+npx prisma generate
 npx prisma migrate deploy
 npx prisma db seed
 npm run start:dev
@@ -80,12 +81,32 @@ npm run start:dev
 
 API em `http://localhost:3000`.
 
-### Usuário demo
+### Usuários do seed (só para desenvolvimento)
 
-- E-mail: `demo@fastsell.app`
-- Senha: `Senha@123`
+| Conta | E-mail | Senha | Papel |
+|-------|--------|-------|-------|
+| Cliente | `demo@fastsell.app` | `Senha@123` | CUSTOMER |
+| Administrador | `admin@fastsell.app` | `Admin@123` | ADMIN |
 
-Sem SMTP/Twilio configurados, e-mails e SMS OTP são impressos no console da API.
+O seed também cria um **catálogo de demonstração** (18 produtos, marcas fictícias, imagens ilustrativas geradas localmente em `api/uploads/products`). Não cria pedidos nem avaliações.
+
+Sem SMTP/Twilio configurados, e-mails e SMS são impressos no console da API.
+Fotos ficam em `api/uploads` por padrão; com `STORAGE_DRIVER=s3` e as variáveis `S3_*` vão para um bucket S3/R2/MinIO.
+Sem `MELHOR_ENVIO_TOKEN` + `STORE_ORIGIN_CEP`, a cotação de frete responde 503 `SHIPPING_NOT_CONFIGURED` (nenhum valor é inventado).
+
+### Testes
+
+```bash
+npm test             # unitários
+npm run test:e2e     # HTTP real + Postgres + Redis (precisa do docker compose rodando)
+```
+
+Os testes e2e gravam no banco de `DATABASE_URL`. Para não misturar com o catálogo de desenvolvimento, use um banco separado:
+
+```bash
+DATABASE_URL="postgresql://fastsell:fastsell@127.0.0.1:15432/fastsell_test?schema=public" npx prisma migrate deploy
+DATABASE_URL="postgresql://fastsell:fastsell@127.0.0.1:15432/fastsell_test?schema=public" npm run test:e2e
+```
 
 ### Endpoints principais
 
@@ -102,7 +123,29 @@ Sem SMTP/Twilio configurados, e-mails e SMS OTP são impressos no console da API
 | POST | `/auth/refresh` | Renovar access token |
 | POST | `/auth/logout` | Revogar refresh token |
 | GET | `/me` | Perfil |
+| PATCH | `/me` | Editar nome/telefone/CPF (CPF com dígitos verificadores) |
+| POST | `/me/photo` | Foto de perfil PNG/JPG até 5MB |
 | PATCH | `/me/settings` | Ligar/desligar biometria no perfil |
+| GET | `/reset-password?token=` | Página do link do e-mail (abre o app) |
+
+#### Sprint 3
+
+| Método | Rota | História |
+|--------|------|----------|
+| GET/PATCH | `/me/notification-preferences` | US08 |
+| POST | `/me/account/deletion-request` → `/me/account/deletion-confirm` | US09 |
+| GET | `/products?q=&categoryIds=&brandIds=&minPrice=&maxPrice=&inStock=&sort=&page=` | US10 |
+| GET | `/categories`, `/brands` | US10 |
+| GET | `/products/:idOuSlug`, `/products/:id/stock` | US11 / US31 |
+| GET/POST | `/products/:id/reviews`, `GET /products/:id/reviews/eligibility` | US12 |
+| GET/PUT/DELETE | `/me/favorites`, `/me/favorites/ids`, `/me/favorites/:productId` | US13 |
+| GET/POST/PATCH/DELETE | `/me/cart`, `/me/cart/items/:id`, `POST /me/cart/validate` | US14 |
+| POST | `/me/cart/shipping-quote` | US15 |
+| POST/GET | `/me/orders/checkout`, `/me/orders`, `/me/orders/:id` | checkout mínimo |
+| * | `/admin/products` (lista, inclui desativados), `/admin/variants/:id`, `/admin/categories`, `/admin/brands`, `/admin/notifications/promotions` | US31 (ADMIN) |
+| GET | `/audit`, `/audit/stats` | agora só ADMIN |
+
+Preços sempre em centavos (`priceCents`). Detalhes e decisões: [`docs/SPRINT03.md`](docs/SPRINT03.md).
 
 ### Regras de segurança (Sprint 1)
 
@@ -143,8 +186,11 @@ flutter run --dart-define=API_BASE_URL=http://192.168.0.10:3000
 - Login / cadastro
 - Modal OTP 2FA
 - Esqueci senha / nova senha (deep link `fastsell://reset-password`)
-- Home logada
-- Configurações (toggle biometria)
+- Área logada com abas: Loja (busca e filtros), Favoritos, Carrinho (frete e checkout) e Conta
+- Página do produto: galeria com zoom, variações, estoque e avaliações
+- Meus pedidos / avaliar compra
+- Configurações: biometria, 2FA, notificações, sessões, excluir conta
+- Painel administrativo (só conta ADMIN): produtos, variações, estoque, fotos, categorias e marcas
 
 Biometria real só funciona em device/simulador com Face ID / digital. Em emulador sem biometria, o fluxo cai no login por senha.
 
@@ -160,5 +206,6 @@ Ver [`src/main.cpp`](src/main.cpp) e [`platformio.ini`](platformio.ini).
 ## Próximos passos
 
 - Comunicação BLE/Wi-Fi com o ESP32
-- Fluxo completo de ativação 2FA na UI
 - Templates de e-mail em produção (Resend/SES) e SMS (Twilio)
+- Pagamento (US18/US19) e push via FCM (US23)
+- Ver pendências da sprint em [`docs/SPRINT03.md`](docs/SPRINT03.md)

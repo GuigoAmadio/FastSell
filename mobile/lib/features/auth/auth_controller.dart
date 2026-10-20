@@ -1,5 +1,6 @@
 import 'package:flutter/scheduler.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:image_picker/image_picker.dart';
 import '../../core/api_client.dart';
 import '../../core/biometric_service.dart';
 import '../../core/secure_storage.dart';
@@ -279,10 +280,10 @@ class AuthController extends Notifier<AuthState> {
     }
   }
 
-  Future<void> uploadPhoto(String path) async {
+  Future<void> uploadPhoto(XFile file) async {
     state = state.copyWith(loading: true, clearError: true);
     try {
-      final user = await _repo.uploadPhoto(path);
+      final user = await _repo.uploadPhoto(file);
       state = state.copyWith(user: user, loading: false, clearError: true);
     } catch (e) {
       state = state.copyWith(loading: false, error: _repo.mapError(e));

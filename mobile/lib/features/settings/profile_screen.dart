@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../core/config.dart';
+import '../../core/input_masks.dart';
+import '../../core/validators.dart';
 import '../auth/auth_controller.dart';
 
 class ProfileScreen extends ConsumerStatefulWidget {
@@ -16,14 +18,20 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   final _phone = TextEditingController();
   final _cpf = TextEditingController();
   final _formKey = GlobalKey<FormState>();
+  late String _initialName;
+  late String _initialPhone;
+  late String _initialCpf;
 
   @override
   void initState() {
     super.initState();
     final user = ref.read(authControllerProvider).user;
     _name.text = user?.name ?? '';
-    _phone.text = _formatPhone(user?.phone ?? '');
-    _cpf.text = _formatCpf(user?.cpf ?? '');
+    _phone.text = formatPhone(user?.phone ?? '');
+    _cpf.text = formatCpf(user?.cpf ?? '');
+    _initialName = _name.text.trim();
+    _initialPhone = onlyDigits(_phone.text);
+    _initialCpf = onlyDigits(_cpf.text);
   }
 
   @override
@@ -32,28 +40,6 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     _phone.dispose();
     _cpf.dispose();
     super.dispose();
-  }
-
-  String _digits(String v) => v.replaceAll(RegExp(r'\D'), '');
-
-  String _formatPhone(String raw) {
-    final d = _digits(raw);
-    if (d.length <= 2) return d;
-    if (d.length <= 7) return '(${d.substring(0, 2)}) ${d.substring(2)}';
-    if (d.length <= 11) {
-      return '(${d.substring(0, 2)}) ${d.substring(2, 7)}-${d.substring(7)}';
-    }
-    return '(${d.substring(0, 2)}) ${d.substring(2, 7)}-${d.substring(7, 11)}';
-  }
-
-  String _formatCpf(String raw) {
-    final d = _digits(raw);
-    if (d.length <= 3) return d;
-    if (d.length <= 6) return '${d.substring(0, 3)}.${d.substring(3)}';
-    if (d.length <= 9) {
-      return '${d.substring(0, 3)}.${d.substring(3, 6)}.${d.substring(6)}';
-    }
-    return '${d.substring(0, 3)}.${d.substring(3, 6)}.${d.substring(6, 9)}-${d.substring(9, 11)}';
   }
 
   Future<void> _pickPhoto() async {
@@ -65,7 +51,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     );
     if (file == null) return;
     try {
-      await ref.read(authControllerProvider.notifier).uploadPhoto(file.path);
+      await ref.read(authControllerProvider.notifier).uploadPhoto(file);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Foto atualizada')),
@@ -76,12 +62,20 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
 
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
+    final name = _name.text.trim();
+    final phone = onlyDigits(_phone.text);
+    final cpf = onlyDigits(_cpf.text);
+    // Só envia o que mudou: os demais dados do perfil ficam como estão.
+    // Campo apagado vai como "" e a API remove o dado.
     try {
       await ref.read(authControllerProvider.notifier).updateProfile(
-            name: _name.text.trim(),
-            phone: _digits(_phone.text),
-            cpf: _digits(_cpf.text),
+            name: name != _initialName ? name : null,
+            phone: phone != _initialPhone ? phone : null,
+            cpf: cpf != _initialCpf ? cpf : null,
           );
+      _initialName = name;
+      _initialPhone = phone;
+      _initialCpf = cpf;
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Perfil salvo')),
@@ -133,40 +127,30 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
               TextFormField(
                 controller: _phone,
                 keyboardType: TextInputType.phone,
-                decoration: const InputDecoration(labelText: 'Telefone'),
-                onChanged: (v) {
-                  final formatted = _formatPhone(v);
-                  if (formatted != v) {
-                    _phone.value = TextEditingValue(
-                      text: formatted,
-                      selection: TextSelection.collapsed(offset: formatted.length),
-                    );
-                  }
-                },
+                inputFormatters: [MaskFormatter(formatPhone)],
+                decoration: const InputDecoration(
+                  labelText: 'Telefone (opcional)',
+                  hintText: '(11) 98765-4321',
+                ),
                 validator: (v) {
-                  final d = _digits(v ?? '');
-                  if (d.length < 10 || d.length > 11) return 'Telefone inválido';
-                  return null;
+                  if (v == null || v.trim().isEmpty) return null;
+                  return isValidBrPhone(v) ? null : 'Telefone inválido: DDD + número';
                 },
               ),
               const SizedBox(height: 12),
               TextFormField(
                 controller: _cpf,
                 keyboardType: TextInputType.number,
-                decoration: const InputDecoration(labelText: 'CPF'),
-                onChanged: (v) {
-                  final formatted = _formatCpf(v);
-                  if (formatted != v) {
-                    _cpf.value = TextEditingValue(
-                      text: formatted,
-                      selection: TextSelection.collapsed(offset: formatted.length),
-                    );
-                  }
-                },
+                inputFormatters: [MaskFormatter(formatCpf)],
+                decoration: const InputDecoration(
+                  labelText: 'CPF (opcional, exigido para comprar)',
+                  hintText: '000.000.000-00',
+                ),
+                // Máscara não é validação: aqui conferimos os dígitos verificadores.
                 validator: (v) {
-                  final d = _digits(v ?? '');
-                  if (d.length != 11) return 'CPF deve ter 11 dígitos';
-                  return null;
+                  if (v == null || v.trim().isEmpty) return null;
+                  if (onlyDigits(v).length != 11) return 'CPF deve ter 11 dígitos';
+                  return isValidCpf(v) ? null : 'CPF inválido';
                 },
               ),
               const SizedBox(height: 12),

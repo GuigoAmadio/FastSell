@@ -108,6 +108,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             title: const Text('Sessões ativas'),
             onTap: () => Navigator.of(context).pushNamed('/sessions'),
           ),
+          ListTile(
+            leading: const Icon(Icons.notifications_none),
+            title: const Text('Notificações'),
+            onTap: () => Navigator.of(context).pushNamed('/notifications'),
+          ),
+          const Divider(),
+          ListTile(
+            leading: const Icon(Icons.delete_forever_outlined, color: Color(0xFFB3261E)),
+            title: const Text(
+              'Excluir conta',
+              style: TextStyle(color: Color(0xFFB3261E)),
+            ),
+            subtitle: const Text('Exclusão definitiva conforme a LGPD'),
+            onTap: () => Navigator.of(context).pushNamed('/delete-account'),
+          ),
           if (auth.error != null)
             Padding(
               padding: const EdgeInsets.all(16),

@@ -1,4 +1,6 @@
 import 'package:dio/dio.dart';
+import 'package:image_picker/image_picker.dart';
+import '../../core/image_upload.dart';
 import '../../core/api_client.dart';
 import '../../core/secure_storage.dart';
 import 'models.dart';
@@ -132,9 +134,9 @@ class AuthRepository {
     );
   }
 
-  Future<AuthUser> uploadPhoto(String filePath) async {
+  Future<AuthUser> uploadPhoto(XFile file) async {
     final form = FormData.fromMap({
-      'photo': await MultipartFile.fromFile(filePath),
+      'photo': await imageMultipart(file),
     });
     final response = await _api.dio.post('/me/photo', data: form);
     return AuthUser.fromJson(
@@ -163,7 +165,11 @@ class AuthRepository {
         },
       ),
     );
-    final list = (response.data as List<dynamic>? ?? const []);
+    // A API responde { sessions: [...] }; aceita também lista pura.
+    final data = response.data;
+    final list = data is Map
+        ? (data['sessions'] as List<dynamic>? ?? const [])
+        : (data as List<dynamic>? ?? const []);
     return list
         .map((e) => SessionInfo.fromJson(e as Map<String, dynamic>))
         .toList();

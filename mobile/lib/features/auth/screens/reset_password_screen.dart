@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../core/validators.dart';
 import '../auth_controller.dart';
 
 class ResetPasswordScreen extends ConsumerStatefulWidget {
@@ -25,16 +26,14 @@ class _ResetPasswordScreenState extends ConsumerState<ResetPasswordScreen> {
     super.dispose();
   }
 
-  String? _strongPassword(String? value) {
-    if (value == null || value.length < 8) return 'Mínimo 8 caracteres';
-    if (!RegExp(r'[0-9]').hasMatch(value)) return 'Inclua pelo menos um número';
-    if (!RegExp(r'[!@#\$%^&*(),.?":{}|<>_\-+=\[\]\\;/]').hasMatch(value)) {
-      return 'Inclua pelo menos um símbolo';
-    }
-    return null;
-  }
+  // Mesma regra da API (US03): 8+ caracteres, letra, número e símbolo.
+  String? _strongPassword(String? value) => strongPasswordError(value);
 
   Future<void> _submit() async {
+    if (widget.token.isEmpty) {
+      setState(() => _error = 'Link inválido. Peça um novo em "Esqueci minha senha".');
+      return;
+    }
     if (!_formKey.currentState!.validate()) return;
     setState(() {
       _loading = true;
@@ -49,7 +48,9 @@ class _ResetPasswordScreenState extends ConsumerState<ResetPasswordScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Senha redefinida. Faça login.')),
       );
-      Navigator.of(context).pushNamedAndRemoveUntil('/login', (_) => false);
+      // Volta para a raiz (tela de login), e não para uma cópia empilhada dela:
+      // assim, depois do login, a raiz troca sozinha para a Home.
+      Navigator.of(context).pushNamedAndRemoveUntil('/', (_) => false);
     } catch (e) {
       setState(() {
         _error = ref.read(authRepositoryProvider).mapError(e);
@@ -74,7 +75,7 @@ class _ResetPasswordScreenState extends ConsumerState<ResetPasswordScreen> {
                 obscureText: true,
                 decoration: const InputDecoration(
                   labelText: 'Nova senha',
-                  helperText: 'Mín. 8 caracteres, número e símbolo',
+                  helperText: 'Mín. 8 caracteres, com letra, número e símbolo',
                 ),
                 validator: _strongPassword,
               ),

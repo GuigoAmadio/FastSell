@@ -10,6 +10,12 @@ import 'features/settings/addresses_screen.dart';
 import 'features/settings/profile_screen.dart';
 import 'features/settings/sessions_screen.dart';
 import 'features/settings/settings_screen.dart';
+import 'features/admin/admin_products_screen.dart';
+import 'features/cart/cart_screen.dart';
+import 'features/catalog/product_detail_screen.dart';
+import 'features/orders/orders.dart';
+import 'features/settings/delete_account_screen.dart';
+import 'features/settings/notification_preferences_screen.dart';
 import 'core/theme.dart';
 
 class FastSellApp extends ConsumerWidget {
@@ -21,6 +27,16 @@ class FastSellApp extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final auth = ref.watch(authControllerProvider);
 
+    // Ao sair da conta (botão Sair, exclusão de conta ou sessão expirada),
+    // limpa a pilha de telas e volta para a raiz, que agora é o login.
+    // Sem isso, se houver telas empilhadas por cima, o usuário continua vendo o app.
+    ref.listen<AuthState>(authControllerProvider, (prev, next) {
+      if (prev?.status == AuthStatus.authenticated &&
+          next.status == AuthStatus.unauthenticated) {
+        navigatorKey.currentState?.pushNamedAndRemoveUntil('/', (_) => false);
+      }
+    });
+
     return MaterialApp(
       title: 'FastSell',
       debugShowCheckedModeBanner: false,
@@ -31,7 +47,9 @@ class FastSellApp extends ConsumerWidget {
           ? const HomeScreen()
           : const LoginScreen(),
       onGenerateRoute: (settings) {
-        switch (settings.name) {
+        // Na web a rota pode chegar com query (?token=...): separa caminho e parâmetros.
+        final uri = Uri.tryParse(settings.name ?? '') ?? Uri();
+        switch (uri.path) {
           case '/login':
             return MaterialPageRoute(builder: (_) => const LoginScreen());
           case '/register':
@@ -42,6 +60,7 @@ class FastSellApp extends ConsumerWidget {
             );
           case '/reset-password':
             final token = (settings.arguments as String?) ??
+                uri.queryParameters['token'] ??
                 auth.pendingResetToken ??
                 '';
             return MaterialPageRoute(
@@ -57,6 +76,28 @@ class FastSellApp extends ConsumerWidget {
             return MaterialPageRoute(builder: (_) => const SessionsScreen());
           case '/addresses':
             return MaterialPageRoute(builder: (_) => const AddressesScreen());
+          case '/product':
+            final productId = settings.arguments as String;
+            return MaterialPageRoute(
+              builder: (_) => ProductDetailScreen(productId: productId),
+            );
+          case '/cart':
+            return MaterialPageRoute(builder: (_) => const CartScreen());
+          case '/orders':
+            return MaterialPageRoute(builder: (_) => const OrdersScreen());
+          case '/order':
+            final orderId = settings.arguments as String;
+            return MaterialPageRoute(
+              builder: (_) => OrderDetailScreen(orderId: orderId),
+            );
+          case '/notifications':
+            return MaterialPageRoute(
+              builder: (_) => const NotificationPreferencesScreen(),
+            );
+          case '/admin':
+            return MaterialPageRoute(builder: (_) => const AdminProductsScreen());
+          case '/delete-account':
+            return MaterialPageRoute(builder: (_) => const DeleteAccountScreen());
           default:
             return null;
         }

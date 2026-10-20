@@ -28,3 +28,7 @@ mobile/android/local.properties
 Thumbs.db
 .idea/
 *.iml
+
+# Uploads gerados em runtime (avatares, produtos, avaliações) e pelo seed
+api/uploads/
+dump.rdb

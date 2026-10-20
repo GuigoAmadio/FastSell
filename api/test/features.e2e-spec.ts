@@ -1,5 +1,6 @@
 ﻿import { authenticator } from 'otplib';
 import {
+  createAdmin,
   createTestApp,
   destroyTestApp,
   expectOk,
@@ -376,8 +377,17 @@ describe('FastSell features (HTTP real + DB + AuditLog)', () => {
   });
 
   describe('Auditoria - API de consulta', () => {
-    it('GET /audit e /audit/stats retornam dados apos mutacoes', async () => {
+    it('GET /audit exige ADMIN (dados pessoais na auditoria)', async () => {
       const session = await registerAndLogin(ctx);
+      const res = await ctx
+        .http()
+        .get('/audit?limit=5')
+        .set('Authorization', `Bearer ${session.accessToken}`);
+      expect(res.status).toBe(403);
+    });
+
+    it('GET /audit e /audit/stats retornam dados apos mutacoes', async () => {
+      const session = await createAdmin(ctx);
       const res = await ctx
         .http()
         .get('/audit?limit=20')

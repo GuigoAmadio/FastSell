@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../core/validators.dart';
 import '../auth_controller.dart';
 
 class RegisterScreen extends ConsumerStatefulWidget {
@@ -23,14 +24,8 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
     super.dispose();
   }
 
-  String? _strongPassword(String? value) {
-    if (value == null || value.length < 8) return 'Mínimo 8 caracteres';
-    if (!RegExp(r'[0-9]').hasMatch(value)) return 'Inclua pelo menos um número';
-    if (!RegExp(r'[!@#\$%^&*(),.?":{}|<>_\-+=\[\]\\;/]').hasMatch(value)) {
-      return 'Inclua pelo menos um símbolo';
-    }
-    return null;
-  }
+  // Mesma regra da API (US03): 8+ caracteres, letra, número e símbolo.
+  String? _strongPassword(String? value) => strongPasswordError(value);
 
   @override
   Widget build(BuildContext context) {
@@ -67,7 +62,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                 obscureText: true,
                 decoration: const InputDecoration(
                   labelText: 'Senha',
-                  helperText: 'Mín. 8 caracteres, número e símbolo',
+                  helperText: 'Mín. 8 caracteres, com letra, número e símbolo',
                 ),
                 validator: _strongPassword,
               ),

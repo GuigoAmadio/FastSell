@@ -1,7 +1,10 @@
 import {
   BadRequestException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   Injectable,
+  Logger,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -16,6 +19,8 @@ import { MailService } from '../mail/mail.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { SmsService } from '../sms/sms.service';
+import { StorageService } from '../storage/storage.service';
+import { normalizeBrPhone, onlyDigits } from '../common/validators';
 import {
   Confirm2faDto,
   ForgotPasswordDto,
@@ -37,12 +42,15 @@ type PublicUser = {
   biometricEnabled: boolean;
   twoFactorEnabled: boolean;
   twoFactorMethod: TwoFactorMethod | null;
+  role: User['role'];
 };
 
 type TokenMeta = { ip?: string; userAgent?: string };
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
@@ -50,6 +58,7 @@ export class AuthService {
     private readonly config: ConfigService,
     private readonly mail: MailService,
     private readonly sms: SmsService,
+    private readonly storage: StorageService,
   ) {}
 
   private toPublic(user: User): PublicUser {
@@ -63,6 +72,7 @@ export class AuthService {
       biometricEnabled: user.biometricEnabled,
       twoFactorEnabled: user.twoFactorEnabled,
       twoFactorMethod: user.twoFactorMethod,
+      role: user.role,
     };
   }
 
@@ -92,7 +102,11 @@ export class AuthService {
     let os = '';
     if (ua.includes('android')) {
       os = 'Android';
-    } else if (ua.includes('iphone') || ua.includes('ipad') || ua.includes('ios')) {
+    } else if (
+      ua.includes('iphone') ||
+      ua.includes('ipad') ||
+      ua.includes('ios')
+    ) {
       os = 'iOS';
     } else if (ua.includes('windows')) {
       os = 'Windows';
@@ -137,7 +151,9 @@ export class AuthService {
   }
 
   async register(dto: RegisterDto, meta?: TokenMeta) {
-    const existing = await this.prisma.user.findUnique({ where: { email: dto.email.toLowerCase() } });
+    const existing = await this.prisma.user.findUnique({
+      where: { email: dto.email.toLowerCase() },
+    });
     if (existing) {
       throw new BadRequestException('E-mail já cadastrado');
     }
@@ -148,7 +164,7 @@ export class AuthService {
         email: dto.email.toLowerCase(),
         passwordHash,
         name: dto.name,
-        phone: dto.phone,
+        phone: dto.phone ? normalizeBrPhone(dto.phone) : null,
       },
     });
 
@@ -167,13 +183,64 @@ export class AuthService {
     return `login:fail:ip:${ip}`;
   }
 
+  private lockIpKey(ip: string) {
+    return `login:lock:ip:${ip}`;
+  }
+
+  /**
+   * Segundos restantes de bloqueio da conta. A fonte de verdade é a coluna
+   * User.lockedUntil (persistida); a chave no Redis é só um atalho.
+   */
+  private async accountLockRemaining(user: User): Promise<number> {
+    const redisTtl = await this.redis.ttl(this.lockKey(user.id));
+    const dbTtl = user.lockedUntil
+      ? Math.ceil((user.lockedUntil.getTime() - Date.now()) / 1000)
+      : 0;
+    return Math.max(redisTtl, dbTtl, 0);
+  }
+
   async login(dto: LoginDto, ip?: string, userAgent?: string) {
     const email = dto.email.toLowerCase();
-    const user = await this.prisma.user.findUnique({ where: { email } });
+    const found = await this.prisma.user.findUnique({ where: { email } });
+    // Conta anonimizada (US09) se comporta como inexistente.
+    const user = found && !found.deletedAt ? found : null;
+
+    // Bloqueio por IP: barra força bruta distribuída em várias contas / e-mails inexistentes.
+    if (ip) {
+      const ipTtl = await this.redis.ttl(this.lockIpKey(ip));
+      if (ipTtl > 0) {
+        await this.prisma.loginAttempt.create({
+          data: {
+            userId: user?.id,
+            email,
+            ip,
+            success: false,
+            reason: 'ip_locked',
+          },
+        });
+        throw new HttpException(
+          {
+            message:
+              'Muitas tentativas a partir deste endereço. Tente mais tarde.',
+            lockRemainingSeconds: ipTtl,
+          },
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
+    }
 
     if (user) {
-      const lockedTtl = await this.redis.ttl(this.lockKey(user.id));
+      const lockedTtl = await this.accountLockRemaining(user);
       if (lockedTtl > 0) {
+        await this.prisma.loginAttempt.create({
+          data: {
+            userId: user.id,
+            email,
+            ip,
+            success: false,
+            reason: 'account_locked',
+          },
+        });
         throw new ForbiddenException({
           message: 'Conta temporariamente bloqueada por tentativas incorretas',
           lockRemainingSeconds: lockedTtl,
@@ -181,7 +248,9 @@ export class AuthService {
       }
     }
 
-    const valid = user ? await argon2.verify(user.passwordHash, dto.password) : false;
+    const valid = user
+      ? await argon2.verify(user.passwordHash, dto.password)
+      : false;
 
     if (!user || !valid) {
       if (user) {
@@ -190,6 +259,7 @@ export class AuthService {
         await this.prisma.loginAttempt.create({
           data: { email, ip, success: false, reason: 'user_not_found' },
         });
+        await this.registerIpFailure(ip);
       }
       throw new UnauthorizedException('E-mail ou senha inválidos');
     }
@@ -197,10 +267,7 @@ export class AuthService {
     await this.prisma.loginAttempt.create({
       data: { userId: user.id, email, ip, success: true },
     });
-    await this.redis.del(this.failUserKey(user.id));
-    if (ip) {
-      await this.redis.del(this.failIpKey(ip));
-    }
+    await this.clearLoginLock(user.id, ip);
 
     if (user.twoFactorEnabled) {
       return this.start2faChallenge(user);
@@ -221,20 +288,59 @@ export class AuthService {
 
     const maxAttempts = Number(this.config.get('LOGIN_MAX_ATTEMPTS', 5));
     const lockSeconds = Number(this.config.get('LOGIN_LOCKOUT_SECONDS', 900));
-    const fails = await this.redis.incrWithTtl(this.failUserKey(user.id), lockSeconds);
-    if (ip) {
-      await this.redis.incrWithTtl(this.failIpKey(ip), lockSeconds);
-    }
+    const fails = await this.redis.incrWithTtl(
+      this.failUserKey(user.id),
+      lockSeconds,
+    );
+    await this.registerIpFailure(ip);
 
     if (fails >= maxAttempts) {
+      const lockedUntil = new Date(Date.now() + lockSeconds * 1000);
       await this.redis.setex(this.lockKey(user.id), lockSeconds, '1');
       await this.redis.del(this.failUserKey(user.id));
-      await this.mail.send(
-        user.email,
-        'Alerta de segurança — FastSell',
-        this.mail.lockoutAlertHtml(user.name, Math.ceil(lockSeconds / 60)),
-      );
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: { lockedUntil },
+      });
+      // Alerta de segurança é transacional: ignora preferências de notificação (US08)
+      // e uma falha de SMTP não pode transformar o 401 em 500.
+      try {
+        await this.mail.send(
+          user.email,
+          'Alerta de segurança — FastSell',
+          this.mail.lockoutAlertHtml(user.name, Math.ceil(lockSeconds / 60)),
+        );
+      } catch (err) {
+        this.logger.error(
+          `Falha ao enviar alerta de bloqueio: ${(err as Error).message}`,
+        );
+      }
     }
+  }
+
+  private async registerIpFailure(ip: string | undefined) {
+    if (!ip) return;
+    const lockSeconds = Number(this.config.get('LOGIN_LOCKOUT_SECONDS', 900));
+    const maxIp = Number(this.config.get('LOGIN_IP_MAX_ATTEMPTS', 20));
+    const ipFails = await this.redis.incrWithTtl(
+      this.failIpKey(ip),
+      lockSeconds,
+    );
+    if (ipFails >= maxIp) {
+      await this.redis.setex(this.lockIpKey(ip), lockSeconds, '1');
+      await this.redis.del(this.failIpKey(ip));
+    }
+  }
+
+  private async clearLoginLock(userId: string, ip?: string) {
+    await this.redis.del(this.failUserKey(userId), this.lockKey(userId));
+    if (ip) {
+      await this.redis.del(this.failIpKey(ip));
+    }
+    await this.prisma.user.updateMany({
+      where: { id: userId, lockedUntil: { not: null } },
+      data: { lockedUntil: null },
+    });
   }
 
   private async start2faChallenge(user: User) {
@@ -246,7 +352,11 @@ export class AuthService {
       attempts: 0,
     };
 
-    await this.redis.setex(`2fa:challenge:${challengeId}`, ttl, JSON.stringify(payload));
+    await this.redis.setex(
+      `2fa:challenge:${challengeId}`,
+      ttl,
+      JSON.stringify(payload),
+    );
 
     if (user.twoFactorMethod === TwoFactorMethod.SMS) {
       if (!user.phone) {
@@ -281,10 +391,14 @@ export class AuthService {
     const maxAttempts = Number(this.config.get('OTP_MAX_ATTEMPTS', 3));
     if (challenge.attempts >= maxAttempts) {
       await this.redis.del(key, `2fa:sms:${dto.challengeId}`);
-      throw new ForbiddenException('Bloqueio temporário: 3 tentativas incorretas de OTP');
+      throw new ForbiddenException(
+        'Bloqueio temporário: 3 tentativas incorretas de OTP',
+      );
     }
 
-    const user = await this.prisma.user.findUnique({ where: { id: challenge.userId } });
+    const user = await this.prisma.user.findUnique({
+      where: { id: challenge.userId },
+    });
     if (!user || !user.twoFactorEnabled) {
       throw new UnauthorizedException('Usuário inválido');
     }
@@ -306,7 +420,9 @@ export class AuthService {
       await this.redis.setex(key, Math.max(ttl, 1), JSON.stringify(challenge));
       if (challenge.attempts >= maxAttempts) {
         await this.redis.del(key, `2fa:sms:${dto.challengeId}`);
-        throw new ForbiddenException('Bloqueio temporário: 3 tentativas incorretas de OTP');
+        throw new ForbiddenException(
+          'Bloqueio temporário: 3 tentativas incorretas de OTP',
+        );
       }
       throw new UnauthorizedException('Código OTP inválido');
     }
@@ -316,7 +432,9 @@ export class AuthService {
   }
 
   async setup2fa(userId: string, dto: Setup2faDto) {
-    const user = await this.prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    const user = await this.prisma.user.findUniqueOrThrow({
+      where: { id: userId },
+    });
 
     if (dto.method === 'SMS') {
       const phone = dto.phone || user.phone;
@@ -331,7 +449,11 @@ export class AuthService {
       const setupId = randomBytes(16).toString('hex');
       const code = String(randomInt(100000, 999999));
       const ttl = Number(this.config.get('OTP_TTL_SECONDS', 300));
-      await this.redis.setex(`2fa:setup:${userId}`, ttl, JSON.stringify({ setupId, method: 'SMS', code }));
+      await this.redis.setex(
+        `2fa:setup:${userId}`,
+        ttl,
+        JSON.stringify({ setupId, method: 'SMS', code }),
+      );
       await this.sms.sendOtp(phone, code);
 
       return { method: 'SMS' as const, setupId, expiresInSeconds: ttl };
@@ -359,13 +481,22 @@ export class AuthService {
   async confirm2fa(userId: string, dto: Confirm2faDto) {
     const raw = await this.redis.get(`2fa:setup:${userId}`);
     if (!raw) {
-      throw new BadRequestException('Configuração 2FA expirada. Inicie novamente.');
+      throw new BadRequestException(
+        'Configuração 2FA expirada. Inicie novamente.',
+      );
     }
 
-    const setup = JSON.parse(raw) as { method: string; secret?: string; code?: string };
+    const setup = JSON.parse(raw) as {
+      method: string;
+      secret?: string;
+      code?: string;
+    };
 
     if (setup.method === 'TOTP') {
-      const ok = authenticator.verify({ token: dto.code, secret: setup.secret! });
+      const ok = authenticator.verify({
+        token: dto.code,
+        secret: setup.secret!,
+      });
       if (!ok) {
         throw new UnauthorizedException('Código TOTP inválido');
       }
@@ -391,7 +522,9 @@ export class AuthService {
     }
 
     await this.redis.del(`2fa:setup:${userId}`);
-    const user = await this.prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    const user = await this.prisma.user.findUniqueOrThrow({
+      where: { id: userId },
+    });
     return { user: this.toPublic(user) };
   }
 
@@ -410,67 +543,121 @@ export class AuthService {
   async forgotPassword(dto: ForgotPasswordDto) {
     const email = dto.email.toLowerCase();
     const user = await this.prisma.user.findUnique({ where: { email } });
+    const genericResponse = {
+      message: 'Se o e-mail existir, enviaremos um link de redefinição.',
+    };
 
-    // Always return success to avoid user enumeration
-    if (!user) {
-      return { message: 'Se o e-mail existir, enviaremos um link de redefinição.' };
+    // Sempre responde igual para não revelar quais e-mails existem.
+    if (!user || user.deletedAt) {
+      return genericResponse;
+    }
+
+    // Limite simples contra spam de e-mails: 5 pedidos por hora por conta.
+    const requests = await this.redis.incrWithTtl(`reset:req:${user.id}`, 3600);
+    if (requests > 5) {
+      return genericResponse;
     }
 
     const token = randomBytes(32).toString('hex');
     const hours = Number(this.config.get('RESET_TOKEN_TTL_HOURS', 24));
     const expiresAt = new Date(Date.now() + hours * 60 * 60 * 1000);
 
-    await this.prisma.passwordResetToken.create({
-      data: {
-        userId: user.id,
-        tokenHash: this.hashToken(token),
-        expiresAt,
-      },
-    });
+    // Só o link mais recente vale: pedidos anteriores ainda não usados são invalidados.
+    await this.prisma.$transaction([
+      this.prisma.passwordResetToken.updateMany({
+        where: { userId: user.id, usedAt: null },
+        data: { usedAt: new Date() },
+      }),
+      this.prisma.passwordResetToken.create({
+        data: {
+          userId: user.id,
+          tokenHash: this.hashToken(token),
+          expiresAt,
+        },
+      }),
+    ]);
 
-    const deepLink = this.config.get<string>('MOBILE_RESET_DEEP_LINK', 'fastsell://reset-password');
-    const webLink = this.config.get<string>('FRONTEND_RESET_URL', 'http://localhost:3000/reset-password');
+    const deepLink = this.config.get<string>(
+      'MOBILE_RESET_DEEP_LINK',
+      'fastsell://reset-password',
+    );
+    const webLink = this.config.get<string>(
+      'FRONTEND_RESET_URL',
+      'http://localhost:3000/reset-password',
+    );
     const resetUrl = `${webLink}?token=${token}&deeplink=${encodeURIComponent(`${deepLink}?token=${token}`)}`;
 
     await this.mail.send(
       user.email,
       'Redefinição de senha — FastSell',
-      this.mail.passwordResetHtml(user.name, resetUrl),
+      this.mail.passwordResetHtml(user.name, resetUrl, hours),
     );
+
+    // Sem SMTP o e-mail só vai para o log, no meio do HTML. Em desenvolvimento,
+    // mostra o link numa linha própria, já apontando para o app web.
+    if (!this.mail.isConfigured) {
+      const webApp = this.config.get<string>('WEB_APP_URL');
+      const devLink = webApp
+        ? `${webApp.replace(/\/$/, '')}/#/reset-password?token=${token}`
+        : resetUrl;
+      this.logger.log(`[DEV] Link de redefinição de senha: ${devLink}`);
+    }
 
     const expose =
       this.config.get('EXPOSE_DEV_TOKENS') === '1' ||
       process.env.NODE_ENV === 'test';
 
     return {
-      message: 'Se o e-mail existir, enviaremos um link de redefinição.',
+      ...genericResponse,
       ...(expose ? { resetToken: token } : {}),
     };
   }
 
   async resetPassword(dto: ResetPasswordDto) {
     const tokenHash = this.hashToken(dto.token);
-    const record = await this.prisma.passwordResetToken.findUnique({ where: { tokenHash } });
+    const record = await this.prisma.passwordResetToken.findUnique({
+      where: { tokenHash },
+    });
 
     if (!record || record.usedAt || record.expiresAt < new Date()) {
-      throw new BadRequestException('Token de redefinição inválido ou expirado');
+      throw new BadRequestException(
+        'Token de redefinição inválido ou expirado',
+      );
     }
 
     const passwordHash = await argon2.hash(dto.password);
+    const now = new Date();
+    // Marca como usado de forma condicional: duas requisições simultâneas com o
+    // mesmo token não conseguem redefinir a senha duas vezes.
+    const consumed = await this.prisma.passwordResetToken.updateMany({
+      where: { id: record.id, usedAt: null },
+      data: { usedAt: now },
+    });
+    if (consumed.count === 0) {
+      throw new BadRequestException(
+        'Token de redefinição inválido ou expirado',
+      );
+    }
+
     await this.prisma.$transaction([
       this.prisma.user.update({
         where: { id: record.userId },
-        data: { passwordHash },
+        data: { passwordHash, lockedUntil: null },
       }),
-      this.prisma.passwordResetToken.update({
-        where: { id: record.id },
-        data: { usedAt: new Date() },
+      this.prisma.passwordResetToken.updateMany({
+        where: { userId: record.userId, usedAt: null },
+        data: { usedAt: now },
       }),
       this.prisma.refreshToken.updateMany({
         where: { userId: record.userId, revokedAt: null },
-        data: { revokedAt: new Date() },
+        data: { revokedAt: now },
       }),
     ]);
+    // Quem provou ser dono do e-mail não precisa esperar o fim do bloqueio (US04).
+    await this.redis.del(
+      this.lockKey(record.userId),
+      this.failUserKey(record.userId),
+    );
 
     return { message: 'Senha redefinida com sucesso' };
   }
@@ -482,7 +669,12 @@ export class AuthService {
       include: { user: true },
     });
 
-    if (!stored || stored.revokedAt || stored.expiresAt < new Date()) {
+    if (
+      !stored ||
+      stored.revokedAt ||
+      stored.expiresAt < new Date() ||
+      stored.user.deletedAt
+    ) {
       throw new UnauthorizedException('Refresh token inválido');
     }
 
@@ -504,13 +696,17 @@ export class AuthService {
   }
 
   async me(userId: string) {
-    const user = await this.prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    const user = await this.prisma.user.findUniqueOrThrow({
+      where: { id: userId },
+    });
     return { user: this.toPublic(user) };
   }
 
   async listSessions(userId: string, currentRefreshToken?: string) {
     const now = new Date();
-    const currentHash = currentRefreshToken ? this.hashToken(currentRefreshToken) : null;
+    const currentHash = currentRefreshToken
+      ? this.hashToken(currentRefreshToken)
+      : null;
 
     const sessions = await this.prisma.refreshToken.findMany({
       where: {
@@ -558,7 +754,9 @@ export class AuthService {
   }
 
   async revokeAllSessions(userId: string, currentRefreshToken?: string) {
-    const currentHash = currentRefreshToken ? this.hashToken(currentRefreshToken) : null;
+    const currentHash = currentRefreshToken
+      ? this.hashToken(currentRefreshToken)
+      : null;
 
     await this.prisma.refreshToken.updateMany({
       where: {
@@ -575,20 +773,32 @@ export class AuthService {
   async updateProfile(userId: string, dto: UpdateProfileDto) {
     const user = await this.prisma.user.update({
       where: { id: userId },
+      // Só os campos enviados mudam: os demais dados do perfil são preservados.
+      // CPF e telefone são gravados só com dígitos (máscara é papel da interface).
       data: {
         ...(dto.name !== undefined ? { name: dto.name } : {}),
-        ...(dto.phone !== undefined ? { phone: dto.phone } : {}),
-        ...(dto.cpf !== undefined ? { cpf: dto.cpf } : {}),
+        ...(dto.phone !== undefined
+          ? { phone: dto.phone === null ? null : normalizeBrPhone(dto.phone) }
+          : {}),
+        ...(dto.cpf !== undefined
+          ? { cpf: dto.cpf === null ? null : onlyDigits(dto.cpf) }
+          : {}),
       },
     });
     return { user: this.toPublic(user) };
   }
 
   async updatePhoto(userId: string, photoUrl: string) {
+    const previous = await this.prisma.user.findUniqueOrThrow({
+      where: { id: userId },
+    });
     const user = await this.prisma.user.update({
       where: { id: userId },
       data: { photoUrl },
     });
+    if (previous.photoUrl && previous.photoUrl !== photoUrl) {
+      await this.storage.remove(previous.photoUrl);
+    }
     return { user: this.toPublic(user) };
   }
 

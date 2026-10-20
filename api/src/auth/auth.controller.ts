@@ -15,9 +15,8 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Request } from 'express';
-import { diskStorage } from 'multer';
-import { extname, join } from 'path';
-import { existsSync, mkdirSync } from 'fs';
+import { imageUploadOptions } from '../common/uploads';
+import { StorageService } from '../storage/storage.service';
 import { AuthService } from './auth.service';
 import {
   Confirm2faDto,
@@ -40,8 +39,14 @@ import { AddressesService } from './addresses.service';
 type AuthedRequest = Request & { user: { id: string } };
 
 function clientMeta(req: Request) {
-  const ip =
-    (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip;
+  // X-Forwarded-For só é confiável atrás de um proxy reverso conhecido; sem
+  // TRUST_PROXY=1 qualquer cliente poderia trocar de "IP" a cada tentativa e
+  // escapar do bloqueio por IP (US04).
+  const forwarded =
+    process.env.TRUST_PROXY === '1'
+      ? (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()
+      : undefined;
+  const ip = forwarded || req.ip;
   const userAgent = req.headers['user-agent'];
   return { ip, userAgent };
 }
@@ -51,6 +56,7 @@ export class AuthController {
   constructor(
     private readonly auth: AuthService,
     private readonly addresses: AddressesService,
+    private readonly storage: StorageService,
   ) {}
 
   @Post('auth/register')
@@ -121,36 +127,18 @@ export class AuthController {
 
   @UseGuards(JwtAuthGuard)
   @Post('me/photo')
-  @UseInterceptors(
-    FileInterceptor('photo', {
-      limits: { fileSize: 5 * 1024 * 1024 },
-      fileFilter: (_req, file, cb) => {
-        const ok = ['image/jpeg', 'image/png', 'image/jpg'].includes(file.mimetype);
-        if (!ok) {
-          cb(new Error('Apenas PNG/JPG até 5MB') as never, false);
-          return;
-        }
-        cb(null, true);
-      },
-      storage: diskStorage({
-        destination: (_req, _file, cb) => {
-          const dir = join(process.cwd(), 'uploads', 'avatars');
-          if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-          cb(null, dir);
-        },
-        filename: (req, file, cb) => {
-          const userId = (req as AuthedRequest).user.id;
-          cb(null, `${userId}${extname(file.originalname).toLowerCase() || '.jpg'}`);
-        },
-      }),
-    }),
-  )
+  @UseInterceptors(FileInterceptor('photo', imageUploadOptions(1)))
   async uploadPhoto(
     @Req() req: AuthedRequest,
     @UploadedFile() file: Express.Multer.File,
   ) {
     if (!file) throw new BadRequestException('Arquivo obrigatório');
-    const photoUrl = `/uploads/avatars/${file.filename}`;
+    // Confere a assinatura PNG/JPG antes de gravar; nome único evita cache da foto antiga.
+    const photoUrl = await this.storage.save(
+      file,
+      'avatars',
+      `${req.user.id}-${Date.now()}`,
+    );
     return this.auth.updatePhoto(req.user.id, photoUrl);
   }
 
@@ -169,8 +157,7 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   @Get('me/sessions')
   listSessions(@Req() req: AuthedRequest, @Body() _body?: RevokeSessionsDto) {
-    const current =
-      (req.headers['x-refresh-token'] as string) || undefined;
+    const current = (req.headers['x-refresh-token'] as string) || undefined;
     return this.auth.listSessions(req.user.id, current);
   }
 

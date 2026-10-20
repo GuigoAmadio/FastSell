@@ -13,6 +13,13 @@ async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   const httpLogger = new Logger('HTTP');
 
+  // CORS antes dos arquivos estáticos: no Flutter Web as imagens de
+  // /uploads (produtos, avaliações, avatar) são baixadas via XHR e precisam
+  // do cabeçalho Access-Control-Allow-Origin.
+  app.enableCors({
+    origin: true,
+    credentials: true,
+  });
   app.useStaticAssets(uploadsDir, { prefix: '/uploads/' });
 
   app.use((req: Request, res: Response, next: NextFunction) => {
@@ -32,10 +39,6 @@ async function bootstrap() {
       transform: true,
     }),
   );
-  app.enableCors({
-    origin: true,
-    credentials: true,
-  });
   const port = process.env.PORT ?? 3000;
   await app.listen(port, '0.0.0.0');
   console.log(`FastSell API listening on http://0.0.0.0:${port}`);

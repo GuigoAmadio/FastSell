@@ -3,8 +3,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:fastsell_mobile/app.dart';
 
 void main() {
-  testWidgets('App sobe com ProviderScope', (tester) async {
+  testWidgets('App sobe com ProviderScope e abre no login', (tester) async {
     await tester.pumpWidget(const ProviderScope(child: FastSellApp()));
-    expect(find.text('FastSell'), findsWidgets);
+    // Sem sessão salva, a primeira tela é o login ("Entrar no FastSell").
+    // find.text exige texto idêntico; textContaining aceita o trecho.
+    expect(find.textContaining('FastSell'), findsWidgets);
   });
 }

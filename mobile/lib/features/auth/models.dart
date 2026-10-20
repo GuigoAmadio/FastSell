@@ -9,6 +9,11 @@ class AuthUser {
   final bool twoFactorEnabled;
   final String? twoFactorMethod;
 
+  /// CUSTOMER ou ADMIN (US31: painel administrativo só para ADMIN).
+  final String role;
+
+  bool get isAdmin => role == 'ADMIN';
+
   AuthUser({
     required this.id,
     required this.email,
@@ -19,6 +24,7 @@ class AuthUser {
     required this.biometricEnabled,
     required this.twoFactorEnabled,
     this.twoFactorMethod,
+    this.role = 'CUSTOMER',
   });
 
   factory AuthUser.fromJson(Map<String, dynamic> json) {
@@ -32,6 +38,7 @@ class AuthUser {
       biometricEnabled: json['biometricEnabled'] as bool? ?? false,
       twoFactorEnabled: json['twoFactorEnabled'] as bool? ?? false,
       twoFactorMethod: json['twoFactorMethod'] as String?,
+      role: json['role'] as String? ?? 'CUSTOMER',
     );
   }
 
@@ -54,6 +61,7 @@ class AuthUser {
       biometricEnabled: biometricEnabled ?? this.biometricEnabled,
       twoFactorEnabled: twoFactorEnabled ?? this.twoFactorEnabled,
       twoFactorMethod: twoFactorMethod ?? this.twoFactorMethod,
+      role: role,
     );
   }
 }

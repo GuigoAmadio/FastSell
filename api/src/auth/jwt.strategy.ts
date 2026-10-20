@@ -18,10 +18,13 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: { sub: string; email: string }) {
-    const user = await this.prisma.user.findUnique({ where: { id: payload.sub } });
-    if (!user) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: payload.sub },
+    });
+    // Conta anonimizada (US09) não autentica mais, mesmo com access token ainda válido.
+    if (!user || user.deletedAt) {
       return null;
     }
-    return { id: user.id, email: user.email };
+    return { id: user.id, email: user.email, role: user.role };
   }
 }
